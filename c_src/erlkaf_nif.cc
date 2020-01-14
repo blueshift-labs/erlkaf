@@ -5,8 +5,6 @@
 #include "erlkaf_producer.h"
 #include "erlkaf_consumer.h"
 
-
-
 const char kAtomOk[] = "ok";
 const char kAtomUndefined[] = "undefined";
 const char kAtomError[] = "error";
