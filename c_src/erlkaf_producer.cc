@@ -275,9 +275,9 @@ ERL_NIF_TERM enif_get_metadata(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv
 
     for (int i = 0 ; i < metadata->broker_cnt ; i++) {
         ERL_NIF_TERM broker_map = enif_make_new_map(env);
-        ERL_NIF_TERM id_term = enif_make_int(env, metadata->brokers[0].id);
-        ERL_NIF_TERM host_term = make_binary(env, metadata->brokers[0].host, strlen(metadata->brokers[0].host));
-        ERL_NIF_TERM port_term = enif_make_int64(env, metadata->brokers[0].port);
+        ERL_NIF_TERM id_term = enif_make_int(env, metadata->brokers[i].id);
+        ERL_NIF_TERM host_term = make_binary(env, metadata->brokers[i].host, strlen(metadata->brokers[i].host));
+        ERL_NIF_TERM port_term = enif_make_int64(env, metadata->brokers[i].port);
         enif_make_map_put(env, broker_map, ATOMS.atomId, id_term, &broker_map);
         enif_make_map_put(env, broker_map, ATOMS.atomHost, host_term, &broker_map);
         enif_make_map_put(env, broker_map, ATOMS.atomPort, port_term, &broker_map);
@@ -292,8 +292,8 @@ ERL_NIF_TERM enif_get_metadata(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv
     for (int i = 0 ; i < metadata->topic_cnt ; i++) {
         const struct rd_kafka_metadata_topic *t = &metadata->topics[i];
         if (t->err) {
-                if (t->err == RD_KAFKA_RESP_ERR_LEADER_NOT_AVAILABLE)
-                        return make_error(env, "failed to get topic info");
+            if (t->err == RD_KAFKA_RESP_ERR_LEADER_NOT_AVAILABLE)
+                return make_error(env, "failed to get topic info");
         }
         ERL_NIF_TERM topic_map = enif_make_new_map(env);
         ERL_NIF_TERM topic_name_term = make_binary(env, t->topic, strlen(t->topic));
