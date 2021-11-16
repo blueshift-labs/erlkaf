@@ -1,8 +1,10 @@
+CPUS=`getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu`
+
 get_deps:
 	@./build_deps.sh
 
 compile_nif: get_deps
-	@make V=0 -C c_src -j 8
+	@make V=0 -C c_src -j $(CPUS)
 
 clean_nif:
 	@make -C c_src clean
@@ -34,7 +36,7 @@ cpplint:
 			c_src/*.*
 
 cppcheck:
-	cppcheck -j 8 \
+	cppcheck -j $(CPUS) \
              -I /usr/local/opt/openssl/include \
              -I deps/librdkafka/src \
              -I $(ERTS_INCLUDE_DIR) \

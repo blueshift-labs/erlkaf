@@ -1,7 +1,7 @@
 # erlkaf
-[![Build Status](https://travis-ci.org/silviucpp/erlkaf.svg?branch=master)](https://travis-ci.org/silviucpp/erlkaf)
+[![Build Status](https://travis-ci.com/silviucpp/erlkaf.svg?branch=master)](https://travis-ci.com/github/silviucpp/erlkaf)
 ![GitHub](https://img.shields.io/github/license/silviucpp/erlkaf)
-![Hex.pm](https://img.shields.io/hexpm/v/erlkaf)
+[![Hex.pm](https://img.shields.io/hexpm/v/erlkaf)](https://hex.pm/packages/erlkaf)
 
 *Erlang kafka driver based on [librdkafka][1]*
 
@@ -21,6 +21,16 @@ will return immediately. The `librdkafka` driver use it's own thread pool for ma
 has it's own thread from where is sending async the events (delivery reports, logs, statistics) to erlang 
 using `enif_send`.
 
+### Upgrading from v1.X to v2.0.0
+
+Version 2.0.0 contains a major rewrite of the consumer groups in order to be able to scale when you have lot of topics:
+ 
+- In version 1.x each consumer group or producer is creating one dedicated native thread that's used to deliver the callbacks. Starting 2.0.0 no matter 
+how many producers or consumer groups you have, one single thread will be used to deliver the callbacks. 
+
+- In version 1.x each consumer group can handle a list of topics but you cannot specify a callback for each topic. Now the callbacks settings moved
+into the topics list. This breaks the backward compatibility for the API and config. More details into [Changelog][3].
+
 ### User guide
 
 On Ubuntu make sure you have installed :
@@ -31,7 +41,7 @@ sudo apt-get install libsasl2-dev liblz4-dev libzstd-dev
 
 Add `erlkaf` as a dependency to your project. The library works with `rebar`, `rebar3` or `hex.pm`
 
-```
+```erlang
 {deps, [
   {erlkaf, ".*", {git, "https://github.com/silviucpp/erlkaf.git", "master"}},
 }.
@@ -45,7 +55,7 @@ Example of a configuration file (for `sys.config`):
 {erlkaf, [
 
     {global_client_options, [
-        {bootstrap_servers, "broker1.com:9092,broker2.com:9092"},
+        {bootstrap_servers, <<"broker1.com:9092,broker2.com:9092">>},
     ]},
 
     {clients, [
@@ -67,9 +77,13 @@ Example of a configuration file (for `sys.config`):
             {type, consumer},
 
             {group_id, <<"erlkaf_consumer">>},
-            {callback_module, test_consumer},
-            {callback_args, []},
-            {topics, [<<"benchmark">>]},
+            {topics, [
+                {<<"benchmark">>, [
+                    {callback_module, module_topic1},
+                    {callback_args, []},
+                    {dispatch_mode, one_by_one}
+                ]}
+            ]},
             {topic_options, [
                 {auto_offset_reset, smallest}
             ]},
@@ -122,7 +136,7 @@ create_producer() ->
     erlkaf:start(),
 
     ProducerConfig = [
-        {bootstrap_servers, "broker1:9092"},
+        {bootstrap_servers, <<"broker1:9092">>},
         {delivery_report_only_error, false},
         {delivery_report_callback, ?MODULE}
     ],
@@ -173,7 +187,13 @@ basically the event for the same message will be triggered again but with the ne
 
 -include("erlkaf.hrl").
 
--define(TOPICS, [<<"benchmark">>]).
+-define(TOPICS, [
+    {<<"benchmark">>, [
+       {callback_module, ?MODULE},
+       {callback_args, []}, % default [] (you can skip it)
+       {dispatch_mode, one_by_one} % default one_by_one (you can skip it)
+   ]}
+]).
 
 -export([
     create_consumer/0,
@@ -189,9 +209,9 @@ create_consumer() ->
     erlkaf:start(),
     ClientId = client_consumer,
     GroupId = <<"erlkaf_consumer">>,
-    ClientCfg = [{bootstrap_servers, "broker1:9092"}],
+    ClientCfg = [{bootstrap_servers, <<"broker1:9092">>}],
     TopicConf = [{auto_offset_reset, smallest}],
-    ok = erlkaf:create_consumer_group(ClientId, GroupId, ?TOPICS, ClientCfg, TopicConf, ?MODULE, []).
+    ok = erlkaf:create_consumer_group(ClientId, GroupId, ?TOPICS, ClientCfg, TopicConf).
 
 init(Topic, Partition, Offset, Args) ->
     io:format("init topic: ~p partition: ~p offset: ~p args: ~p ~n", [
@@ -217,7 +237,7 @@ You can call those like:
 ```erlang
 ok = test_consumer:create_consumer().
 ```
-  
+
 ### Statistics
 
 In order to get statistics you can register the `stats_callback` callback which is called every `statistics_interval_ms` (default 0 which means
@@ -229,3 +249,4 @@ The list of all available properties of client and topics are described [here][2
 
 [1]:https://github.com/edenhill/librdkafka
 [2]:https://github.com/silviucpp/erlkaf/blob/master/CONFIGURATION.md
+[3]:https://github.com/silviucpp/erlkaf/blob/master/CHANGELOG.md

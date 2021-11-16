@@ -3,13 +3,13 @@
 -include("erlkaf.hrl").
 -include("erlkaf_private.hrl").
 
--define(POLL_IDLE_MS, 1000).
+-define(DEFAULT_POLL_IDLE_MS, 1000).
 -define(DEFAULT_BATCH_SIZE, 100).
 
 -behaviour(gen_server).
 
 -export([
-    start_link/8,
+    start_link/6,
     stop/1,
 
     % gen_server
@@ -30,13 +30,14 @@
     cb_module,
     cb_state,
     poll_batch_size,
+    poll_idle_ms,
     dispatch_mode,
     messages = [],
     last_offset = -1
 }).
 
-start_link(ClientRef, TopicName, DispatchMode, Partition, Offset, QueueRef, CbModule, CbArgs) ->
-    gen_server:start_link(?MODULE, [ClientRef, TopicName, DispatchMode, Partition, Offset, QueueRef, CbModule, CbArgs], []).
+start_link(ClientRef, TopicName, Partition, Offset, QueueRef, TopicSettings) ->
+    gen_server:start_link(?MODULE, [ClientRef, TopicName, Partition, Offset, QueueRef, TopicSettings], []).
 
 stop(Pid) ->
     case erlang:is_process_alive(Pid) of
@@ -54,8 +55,13 @@ stop(Pid) ->
             {error, not_alive}
     end.
 
-init([ClientRef, TopicName, DispatchMode, Partition, Offset, QueueRef, CbModule, CbArgs]) ->
+init([ClientRef, TopicName, Partition, Offset, QueueRef, TopicSettings]) ->
     ?LOG_INFO("start consumer for: ~p partition: ~p offset: ~p", [TopicName, Partition, Offset]),
+
+    CbModule = erlkaf_utils:lookup(callback_module, TopicSettings),
+    CbArgs = erlkaf_utils:lookup(callback_args, TopicSettings, []),
+    DispatchMode = erlkaf_utils:lookup(dispatch_mode, TopicSettings, one_by_one),
+    PollIdleMs = erlkaf_utils:lookup(poll_idle_ms, TopicSettings, ?DEFAULT_POLL_IDLE_MS),
 
     case catch CbModule:init(TopicName, Partition, Offset, CbArgs) of
         {ok, CbState} ->
@@ -71,9 +77,11 @@ init([ClientRef, TopicName, DispatchMode, Partition, Offset, QueueRef, CbModule,
                 cb_module = CbModule,
                 cb_state = CbState,
                 poll_batch_size = PollBatchSize,
+                poll_idle_ms = PollIdleMs,
                 dispatch_mode = DpMode
             }};
         Error ->
+            ?LOG_ERROR("~p:init for topic: ~p failed with: ~p", [CbModule, TopicName, Error]),
             {stop, Error}
     end.
 
@@ -85,12 +93,12 @@ handle_cast(Request, State) ->
     ?LOG_ERROR("handle_cast unexpected message: ~p", [Request]),
     {noreply, State}.
 
-handle_info(poll_events, #state{queue_ref = Queue, poll_batch_size = PollBatchSize} = State) ->
+handle_info(poll_events, #state{queue_ref = Queue, poll_batch_size = PollBatchSize, poll_idle_ms = PollIdleMs} = State) ->
     case erlkaf_nif:consumer_queue_poll(Queue, PollBatchSize) of
         {ok, Events, LastOffset} ->
             case Events of
                 [] ->
-                    schedule_poll(?POLL_IDLE_MS),
+                    schedule_poll(PollIdleMs),
                     {noreply, State};
                 _ ->
                     schedule_message_process(0),

@@ -6,28 +6,26 @@
 #include "rdkafka.h"
 #include "erlkaf_logger.h"
 #include "queuemanager.h"
+#include "queuecallbacksdispatcher.h"
+#include "erlkaf_message.h"
 
 #include <vector>
 #include <string>
 #include <memory>
+#include <future>
 #include <string.h>
 #include <unistd.h>
 
 namespace {
 
-const char* kThreadOptsId = "librdkafka_consumer_thread_opts";
-const char* kPollThreadId = "librdkafka_consumer_poll_thread";
-
 struct enif_consumer
 {
     rd_kafka_t* kf;
     ErlNifPid owner;
-    ErlNifThreadOpts* thread_opts;
-    ErlNifTid thread_id;
     ErlNifResourceType* res_queue;
-    bool running;
-    bool stop_feedback;
     QueueManager* qm_;
+    bool running;
+    std::future<bool>* closed_future;
 };
 
 struct enif_queue
@@ -48,6 +46,25 @@ enif_queue* enif_new_queue(enif_consumer* consumer, rd_kafka_t* rk, const std::s
     q->queue = partition_queue;
     q->consumer = consumer;
     return q;
+}
+
+bool cleanup_consumer(enif_consumer* consumer, bool stop_feedback)
+{
+    // make sure queues are forwarded back on the main queue before closing
+    consumer->qm_->clear_all();
+
+    rd_kafka_consumer_close(consumer->kf);
+    rd_kafka_destroy(consumer->kf);
+    consumer->kf = nullptr;
+
+    if(stop_feedback)
+    {
+        ErlNifEnv* env = enif_alloc_env();
+        enif_send(NULL, &consumer->owner, env, ATOMS.atomClientStopped);
+        enif_free_env(env);
+    }
+
+    return true;
 }
 
 ERL_NIF_TERM partition_list_to_nif(ErlNifEnv* env, enif_consumer* consumer, rd_kafka_t *rk, rd_kafka_topic_partition_list_t* partitions, bool assign)
@@ -82,41 +99,6 @@ ERL_NIF_TERM partition_list_to_nif(ErlNifEnv* env, enif_consumer* consumer, rd_k
     }
 
     return enif_make_list_from_array(env, items.data(), items.size());
-}
-
-void* consumer_poll_thread(void* arg)
-{
-    enif_consumer* consumer = static_cast<enif_consumer*>(arg);
-
-    while (consumer->running)
-    {
-        rd_kafka_message_t* msg = rd_kafka_consumer_poll(consumer->kf, 100);
-
-        if(msg)
-        {
-            // because communication between nif and erlang it's based on async messages might be a small window
-            // between starting of revoking partitions (queued are forwarded back on the main queue) and when actual we revoked them
-            // when we get the messages here. we drop all this messages as time they have no impact because offset is not changed.
-            // we are sleeping here as well to not consume lot of cpu
-            rd_kafka_message_destroy(msg);
-            usleep(50000);
-        }
-    }
-
-    // make sure queues are forwarded back on the main queue before closing
-    consumer->qm_->clear_all();
-
-    rd_kafka_consumer_close(consumer->kf);
-    rd_kafka_destroy(consumer->kf);
-
-    if(consumer->stop_feedback)
-    {
-        ErlNifEnv* env = enif_alloc_env();
-        enif_send(NULL, &consumer->owner, env, ATOMS.atomClientStopped);
-        enif_free_env(env);
-    }
-
-    return NULL;
 }
 
 void assign_partitions(ErlNifEnv* env, enif_consumer* consumer, rd_kafka_t *rk, rd_kafka_topic_partition_list_t *partitions)
@@ -201,29 +183,6 @@ rd_kafka_topic_partition_list_t* topic_subscribe(ErlNifEnv* env, ERL_NIF_TERM li
     return topics.release();
 }
 
-ERL_NIF_TERM get_headers(ErlNifEnv* env, const rd_kafka_message_t* msg)
-{
-    rd_kafka_headers_t* headers = NULL;
-
-    if(rd_kafka_message_headers(msg, &headers) == RD_KAFKA_RESP_ERR_NO_ERROR && headers)
-    {
-        std::vector<ERL_NIF_TERM> array;
-        array.reserve(rd_kafka_header_cnt(headers));
-
-        const char *name;
-        const void *valuep;
-        size_t size;
-        size_t idx = 0;
-
-        while (!rd_kafka_header_get_all(headers, idx++, &name, &valuep, &size))
-            array.push_back(enif_make_tuple2(env, make_binary(env, name, strlen(name)), make_binary(env, reinterpret_cast<const char*>(valuep), size)));
-
-        return enif_make_list_from_array(env, array.data(), array.size());
-    }
-
-    return ATOMS.atomUndefined;
-}
-
 }  // namespace
 
 void enif_queue_free(ErlNifEnv* env, void* obj)
@@ -245,11 +204,16 @@ void enif_consumer_free(ErlNifEnv* env, void* obj)
     enif_consumer* consumer = static_cast<enif_consumer*>(obj);
     consumer->running = false;
 
-    if(consumer->thread_opts)
+    if(consumer->closed_future)
     {
-        void *result = NULL;
-        enif_thread_join(consumer->thread_id, &result);
-        enif_thread_opts_destroy(consumer->thread_opts);
+        consumer->closed_future->get();
+        delete consumer->closed_future;
+    }
+    else if(consumer->kf)
+    {
+        erlkaf_data* data = static_cast<erlkaf_data*>(enif_priv_data(env));
+        data->notifier_->remove(consumer->kf);
+        cleanup_consumer(consumer, false);
     }
 
     if(consumer->qm_)
@@ -321,15 +285,13 @@ ERL_NIF_TERM enif_consumer_new(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv
         return make_error(env, rd_kafka_err2str(err));
 
     consumer->running = true;
-    consumer->stop_feedback = false;
     consumer->owner = owner;
     consumer->kf = rk.release();
-    consumer->thread_opts = enif_thread_opts_create(const_cast<char*>(kThreadOptsId));
     consumer->res_queue = data->res_queue;
     consumer->qm_ = new QueueManager(consumer->kf);
+    consumer->closed_future = nullptr;
 
-    if (enif_thread_create(const_cast<char*>(kPollThreadId), &consumer->thread_id, consumer_poll_thread, consumer.get(), consumer->thread_opts) != 0)
-        return make_error(env, "failed to create consumer thread");
+    data->notifier_->watch(consumer->kf, true);
 
     ERL_NIF_TERM term = enif_make_resource(env, consumer.get());
     return enif_make_tuple2(env, ATOMS.atomOk, term);
@@ -412,14 +374,8 @@ ERL_NIF_TERM enif_consumer_queue_poll(ErlNifEnv* env, int argc, const ERL_NIF_TE
                 first = false;
             }
 
-            ERL_NIF_TERM key = msg->key == NULL ? ATOMS.atomUndefined : make_binary(env, reinterpret_cast<const char*>(msg->key), msg->key_len);
-            ERL_NIF_TERM offset = enif_make_int64(env, msg->offset);
-            ERL_NIF_TERM value = make_binary(env, reinterpret_cast<const char*>(msg->payload), msg->len);
-            ERL_NIF_TERM headers = get_headers(env, msg);
-            ERL_NIF_TERM msg_term = enif_make_tuple7(env, ATOMS.atomMessage, topic, partition, offset, key, value, headers);
-
+            messages.push_back(make_message_nif(env, topic, partition, msg));
             last_offset = msg->offset;
-            messages.push_back(msg_term);
         }
 
         rd_kafka_event_destroy(event);
@@ -472,8 +428,10 @@ ERL_NIF_TERM enif_consumer_cleanup(ErlNifEnv* env, int argc, const ERL_NIF_TERM 
     if(!enif_get_resource(env, argv[0], data->res_consumer, reinterpret_cast<void**>(&consumer)))
         return make_badarg(env);
 
-    consumer->stop_feedback = true;
     consumer->running = false;
+    data->notifier_->remove(consumer->kf);
+    consumer->closed_future = new std::future<bool>(std::async(std::launch::async, cleanup_consumer, consumer, true));
+
     return ATOMS.atomOk;
 }
 
