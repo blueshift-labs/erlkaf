@@ -34,7 +34,13 @@ start(erlkaf) ->
             ConsumerConfig = [{bootstrap_servers, <<?BROKER_HOST/binary, ":", (integer_to_binary(?BROKER_PORT))/binary>>}],
             TopicConf = [{auto_offset_reset, smallest}],
             GroupId = <<"erlkaf_consumer_benchmark">>,
-            ok = erlkaf:create_consumer_group(client_consumer, GroupId, [?TOPIC], ConsumerConfig, TopicConf, ?MODULE, []);
+            ConsumerTopics = [
+                {?TOPIC, [
+                    {callback_module, ?MODULE}
+                ]}
+            ],
+
+            ok = erlkaf:create_consumer_group(client_consumer, GroupId, ConsumerTopics, ConsumerConfig, TopicConf);
         _ ->
             ok
     end;
@@ -84,7 +90,7 @@ update_stats(State, Partition, Value) ->
                     MsgPerSec = (MsgRecv+1)/DiffSec,
                     BytesPerSec = (BytesRecv + byte_size(Value))/DiffSec,
 
-                    ?INFO_MSG("##partition: ~p recv msg/s: ~p | bytes/s: ~s ~n", [Partition, MsgPerSec, format_size(BytesPerSec)]),
+                    ?LOG_INFO("##partition: ~p recv msg/s: ~p | bytes/s: ~s ~n", [Partition, MsgPerSec, format_size(BytesPerSec)]),
 
                     State#state{msg_recv = 0, bytes_recv = 0, last_ts = Now};
                 _ ->
