@@ -19,7 +19,7 @@ LIBRDKAFKA_SUCCESS=src/librdkafka.a
 CQ_DESTINATION=concurrentqueue
 CQ_REPO=https://github.com/cameron314/concurrentqueue.git
 CQ_BRANCH=master
-CQ_REV=cff1001582db67e357d5f77c31e73566003311f2
+CQ_REV=d49fa2b0bd1c6185d93509f48c8987f9759d7238
 CQ_SUCCESS=concurrentqueue.h
 
 fail_check()
