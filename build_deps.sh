@@ -10,7 +10,7 @@ fi
 
 REPO=https://github.com/edenhill/librdkafka.git
 BRANCH=master
-REV=8681f884020e880a4c6cda3cfc672f0669e1f38e
+REV=9c121d1d251036a0af69c8533f34cc6cafa3ea6f
 
 function fail_check
 {
@@ -45,6 +45,7 @@ function BuildLib()
 	pushd $DESTINATION
 
     OS=$(uname -s)
+    STATIC_LIB_libzstd=$(brew ls -v zstd | grep libzstd.a$)
 
 	case $OS in
         Darwin)
@@ -55,7 +56,7 @@ function BuildLib()
             ;;
     esac
 
-    fail_check ./configure
+    fail_check ./configure --enable-static
     fail_check make
 
     rm src/*.dylib
